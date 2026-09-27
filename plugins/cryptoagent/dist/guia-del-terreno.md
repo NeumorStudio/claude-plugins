@@ -8,16 +8,39 @@ Datos verificados el 27 de septiembre de 2026; las plataformas cambian, así que
 
 | Mercado | Cómo | Herramienta |
 |---|---|---|
-| Cualquier token de Solana con ruta en Jupiter | Swap al precio de cotización de Jupiter en ese instante | `simulate_solana_swap` |
-| Tokens de pump.fun **en la curva** (sin graduar) | Jupiter los enruta por el programa de pump.fun (ruta "Pump.fun") | `simulate_solana_swap` |
-| Tokens de pump.fun **graduados** | Jupiter los enruta por PumpSwap (ruta "Pump.fun Amm") | `simulate_solana_swap` |
+| Cualquier token de Solana con ruta en Jupiter | Swap al precio de cotización de Jupiter en ese instante | `simulate_swap` (chain: solana) |
+| Tokens de pump.fun **en la curva** (sin graduar) | Jupiter los enruta por el programa de pump.fun (ruta "Pump.fun") | `simulate_swap` (chain: solana) |
+| Tokens de pump.fun **graduados** | Jupiter los enruta por PumpSwap (ruta "Pump.fun Amm") | `simulate_swap` (chain: solana) |
+| Cualquier token de **Base** con ruta en KyberSwap (o ParaSwap) | Swap al precio de cotización del agregador en ese instante | `simulate_swap` (chain: base) |
+| Cualquier token de **BNB Chain** con ruta en KyberSwap (o ParaSwap) | Igual que en Base | `simulate_swap` (chain: bsc) |
 | Binance spot | Orden de mercado contra el order book real | `simulate_binance_market_order` |
 | Órdenes condicionales | Se disparan con el precio real, comprobado cada ~60 s | `place_*_trigger_order` |
 
 **No ejecutable** (solo se puede anotar con `record_hypothetical_action`): crear tokens, publicar en redes,
-otras blockchains (Ethereum, Base, BNB Chain…), futuros, préstamos, staking, airdrops.
+otras blockchains (Ethereum, Arbitrum…), futuros, préstamos, staking, airdrops. Si necesitas algo que no
+tienes para intentarlo, pídelo con `request_capability`.
 
-Para saber si un token concreto es operable, pide una cotización con `quote_solana_swap`: si no hay ruta, no se puede.
+**Lanzar un token propio**: `estimate_token_launch` calcula lo que costaría con el gas y los precios de ahora
+(en Solana con pump.fun; en Base y BNB Chain, desplegando un ERC-20 y creando su pool). El lanzamiento en sí
+no se simula, porque su mercado depende de otras personas: si decides hacerlo, anótalo con
+`record_hypothetical_action` junto con la estimación.
+
+**Límites de las fuentes**: las APIs gratuitas tienen límites de peticiones. El simulador reparte el ritmo
+(Jupiter, KyberSwap, GoPlus) y el cupo de Li.Fi (75 cada 2 horas; si se agota, los puentes usan una
+estimación). Si una fuente devuelve 429, espera o usa otra.
+
+Para saber si un token concreto es operable, pide una cotización con `quote_swap` en su cadena: si no hay ruta, no se puede.
+
+Tus monederos: uno en Solana y uno tipo MetaMask (la misma dirección en Base y en BNB Chain, cada cadena con
+sus propios saldos), más tu cuenta de Binance. El reparto inicial del capital lo elige el usuario en cada misión.
+Mover dinero entre sitios (el dinero sale al momento y llega después; mientras tanto aparece "en tránsito"):
+- **Binance ↔ tus monederos** (`simulate_transfer`), por la red de cada cadena: USDC por Solana, Base o BNB Chain;
+  USDT por Solana o BNB Chain; SOL por Solana; ETH por Base; BNB por BNB Chain. Al depositar pagas la red de la
+  cadena; al retirar, la comisión de retirada de Binance, con un mínimo (p. ej. USDC: 0,3 por Solana, 0,2 por
+  Base, 0 por BNB Chain; mínimo 3). Llega en 1-3 minutos.
+- **Entre cadenas** (`simulate_bridge`), con Li.Fi, que elige el puente: pagas el gas en la cadena de origen y la
+  comisión del puente va descontada de lo que recibes (suele ser de céntimos). Puedes cambiar de token por el
+  camino. Llega en segundos o minutos. `quote_bridge` da una estimación sin gastar nada.
 
 ## 2. Cómo se simula (y qué no se simula)
 
@@ -25,7 +48,17 @@ Para saber si un token concreto es operable, pide una cotización con `quote_sol
   Las comisiones de los pools (incluida la de pump.fun) ya van dentro de la cotización.
 - Se cobran además: la fee de red de Solana (fija, configurable) y la renta de la cuenta de token
   (0,00203928 SOL al recibir un token nuevo; se recupera al vaciar esa cuenta). Sin SOL no puedes operar en Solana.
-- Binance: comisión taker 0,1 %, tamaño mínimo por par y retirada de USDC a Solana con comisión.
+- Base y BNB Chain (EVM), como en MetaMask:
+  - El gas se paga en el nativo (ETH en Base, BNB en BNB Chain), con el gas estimado por el agregador y el precio
+    del gas real; en Base se suma la pequeña fee de L1. Sin nativo no puedes operar en esa cadena
+    ("insufficient funds for gas * price + value").
+  - La primera vez que vendes un token hay que aprobar al router (approve): es otra transacción con su gas.
+  - Impuestos de compra y venta del token (datos de GoPlus): recibes menos de lo cotizado. Si el impuesto supera
+    tu slippage, **el swap revierte y pierdes el gas**. Con tokens con impuesto, sube el slippage.
+  - Un token marcado como honeypot no se puede vender: el swap revierte (pagas el gas) y en tu cartera vale 0.
+  - Si GoPlus no conoce el impuesto de un token, la cotización lo avisa: podría tenerlo.
+- Binance: comisión taker 0,1 %, tamaño mínimo por par (unos 5 $) y retirada de USDC o SOL a Solana con comisión.
+- Al transferir un token entre Solana y Binance (`simulate_transfer`), su coste viaja con él: el resultado se mide al venderlo en el destino.
 - **No se simula**: MEV ni sandwiches, competencia por prioridad, latencia entre decidir y ejecutar,
   ni el impacto de tus operaciones en el precio que ven los demás.
 - La cartera se valora a precio de **liquidación**: lo que obtendrías vendiéndolo todo ahora. En tokens con poca
@@ -51,9 +84,17 @@ Fuente principal: documentación oficial (pump.fun/docs/fees, pump.fun/docs/bond
 
 ## 4. Fuentes de datos públicas (sin clave, comprobadas)
 
-Atajos: `scan_market` combina en una llamada las tendencias de Jupiter, pump.fun en directo, los promocionados de
-DexScreener y las tendencias de GeckoTerminal; `token_report` junta la ficha de un token de Jupiter, DexScreener,
-RugCheck y pump.fun. Para cualquier otra consulta, usa estas APIs con `http_get`. Todas devuelven JSON.
+Atajos: `scan_market` combina en una llamada, para la cadena que indiques, las fuentes de candidatos (en Solana:
+tendencias de Jupiter, pump.fun en directo, promocionados de DexScreener y tendencias de GeckoTerminal; en Base y
+BNB Chain: tendencias y pools nuevos de GeckoTerminal y promocionados de DexScreener); `token_report` junta la ficha
+de un token (en Solana: Jupiter, DexScreener, RugCheck y pump.fun; en Base y BNB Chain: DexScreener y la seguridad
+de GoPlus). Para cualquier otra consulta, usa estas APIs con `http_get`. Todas devuelven JSON.
+
+**Base y BNB Chain**
+- Seguridad de un token (honeypot, impuestos, holders): `https://api.gopluslabs.io/api/v1/token_security/<8453 en Base | 56 en BNB Chain>?contract_addresses=<dirección>`
+  (una dirección por consulta; los impuestos vienen en tanto por uno, y vacíos si no se conocen).
+- Pares y precios: `https://api.dexscreener.com/tokens/v1/<base|bsc>/<dirección>`.
+- Tendencias y pools nuevos: `https://api.geckoterminal.com/api/v2/networks/<base|bsc>/trending_pools` y `.../new_pools`.
 
 **pump.fun**
 - Tokens más recientes: `https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false`
