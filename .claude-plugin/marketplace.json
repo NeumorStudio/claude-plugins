@@ -1,0 +1,15 @@
+{
+  "name": "neumorstudio",
+  "description": "Plugins de Claude Code de NeumorStudio.",
+  "owner": {
+    "name": "NeumorStudio"
+  },
+  "plugins": [
+    {
+      "name": "cryptoagent",
+      "source": "./plugins/cryptoagent",
+      "description": "Agente de trading cripto en simulación con precios reales, misiones, memoria y panel en directo.",
+      "version": "0.4.0"
+    }
+  ]
+}
