@@ -9,7 +9,7 @@
       "name": "cryptoagent",
       "source": "./plugins/cryptoagent",
       "description": "Agente de trading cripto en simulación con precios reales, misiones, memoria y panel en directo.",
-      "version": "0.14.2",
+      "version": "0.14.3",
       "displayName": "Cryptoagent",
       "author": {
         "name": "NeumorStudio"
