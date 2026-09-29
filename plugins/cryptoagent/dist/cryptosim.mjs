@@ -7693,7 +7693,7 @@ var init_text = __esm({
 });
 
 // src/migrations.ts
-import { mkdirSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import path3 from "node:path";
 function decisionBackfill(db2) {
   const positions = db2.prepare("SELECT id, mission_id, venue, asset, opened_at, closed_at, status, cost_open_usd, realized_cost_usd, realized_proceeds_usd, research FROM positions ORDER BY opened_at, id").all();
@@ -7882,7 +7882,7 @@ function backup(db2, dataDir, from) {
   const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const file2 = path3.join(dir2, `sim-v${from}-${stamp}-${process.pid}.db`);
   db2.exec(`VACUUM INTO '${file2.replace(/'/g, "''")}'`);
-  const old = readdirSync(dir2).filter((f) => f.startsWith("sim-v") && f.endsWith(".db")).sort();
+  const old = readdirSync(dir2).filter((f) => f.startsWith("sim-v") && f.endsWith(".db")).map((f) => ({ f, t: statSync(path3.join(dir2, f)).mtimeMs })).sort((a, b) => a.t - b.t).map(({ f }) => f);
   for (const f of old.slice(0, Math.max(0, old.length - MAX_BACKUPS))) rmSync(path3.join(dir2, f), { force: true });
   return file2;
 }
@@ -8294,7 +8294,7 @@ var init_db = __esm({
     }
     runMigrations(db, config2.dataDir);
     now = () => (/* @__PURE__ */ new Date()).toISOString();
-    CODE_VERSION = "0.37.1";
+    CODE_VERSION = "0.37.3";
     semver = (v) => v.split(".").map((n3) => Number.parseInt(n3, 10) || 0);
     newer = (a, b) => {
       const [x, y] = [semver(a), semver(b)];
@@ -8401,7 +8401,7 @@ function fetchText(url2, opts = {}) {
   return value;
 }
 function isTransientError(err) {
-  return /HTTP (408|429|5dd)|timeout|timed out|aborted|fetch failed|ECONN|ENOTFOUND|Rate limit/i.test(String(err?.message ?? err));
+  return /HTTP (408|429|5\d\d)|timeout|timed out|aborted|fetch failed|ECONN|ENOTFOUND|Rate limit/i.test(String(err?.message ?? err));
 }
 function isNoRouteError(err) {
   const msg = String(err?.message ?? err);
@@ -9495,6 +9495,8 @@ async function entryFeatures(mint) {
   const lpLocked = Array.isArray(rc?.markets) && rc.markets.length ? Math.max(...rc.markets.map((m) => Number(m.lp?.lpLockedPct ?? 0))) : void 0;
   return {
     ...sharedDeployer ? { creatorIsLaunchpadDeployer: true } : {
+      // false explícito solo si hay datos: sin el campo, una condición "= false" no cumpliría nunca
+      creatorIsLaunchpadDeployer: mints === void 0 ? void 0 : false,
       creator: t?.dev ?? rc?.creator ?? void 0,
       creatorTokens: mints,
       creatorGraduated: migrations,
@@ -9660,14 +9662,14 @@ function marketContext(chain) {
     ...fresh ? { marketYoungTokens: s.young, ...s.medianTraders5m !== void 0 ? { marketMedianTraders5m: s.medianTraders5m } : {} } : {}
   };
 }
-function recordRead(chain, token2, r) {
-  const key = readKey(chain, token2);
+function recordRead(missionId, chain, token2, r) {
+  const key = readKey(missionId, chain, token2);
   const now2 = { at: Date.now(), ...r };
   const prev = reads.get(key);
   reads.set(key, prev && now2.at - prev.first.at <= READS_MAX_AGE_MS ? { first: prev.first, last: now2, count: prev.count + 1 } : { first: now2, last: now2, count: 1 });
 }
-function readTrend(chain, token2) {
-  const r = reads.get(readKey(chain, token2));
+function readTrend(missionId, chain, token2) {
+  const r = reads.get(readKey(missionId, chain, token2));
   if (!r || Date.now() - r.last.at > READS_MAX_AGE_MS) return { readsBeforeBuy: 0 };
   const trend = { readsBeforeBuy: r.count };
   if (r.count >= 2) {
@@ -9677,11 +9679,11 @@ function readTrend(chain, token2) {
   }
   return trend;
 }
-function recordFeatures(chain, token2, features) {
-  decided.set(readKey(chain, token2), { at: Date.now(), features });
+function recordFeatures(missionId, chain, token2, features) {
+  decided.set(readKey(missionId, chain, token2), { at: Date.now(), features });
 }
-function decidedFeatures(chain, token2) {
-  const d = decided.get(readKey(chain, token2));
+function decidedFeatures(missionId, chain, token2) {
+  const d = decided.get(readKey(missionId, chain, token2));
   if (!d || Date.now() - d.at > DECIDED_MAX_AGE_MS) return void 0;
   return { features: d.features, ageSeconds: Math.round((Date.now() - d.at) / 1e3) };
 }
@@ -9693,7 +9695,7 @@ var init_market_state = __esm({
     MAX_AGE_MS = 20 * 6e4;
     reads = /* @__PURE__ */ new Map();
     READS_MAX_AGE_MS = 30 * 6e4;
-    readKey = (chain, token2) => `${chain}:${token2.toLowerCase()}`;
+    readKey = (missionId, chain, token2) => `${missionId ?? "-"}:${chain}:${token2.toLowerCase()}`;
     decided = /* @__PURE__ */ new Map();
     DECIDED_MAX_AGE_MS = 5 * 6e4;
   }
@@ -9734,7 +9736,7 @@ function decisionContext(missionId, venue, asset2, addUsd, cashSpent) {
     ...previous[0] ? { minutesSinceLastTradeInToken: Math.round((Date.now() - new Date(previous[0].at).getTime()) / 6e4) } : {},
     previousTradesInTokenThisMission: previous.filter((p) => p.m === missionId).length,
     // Cómo cambiaba el token entre sus lecturas antes de comprar (liquidez y compradores netos).
-    ...readTrend(venue, asset2),
+    ...readTrend(missionId, venue, asset2),
     ...deadline ? { minutesLeft: Math.max(0, Math.round((new Date(deadline).getTime() - Date.now()) / 6e4)) } : {},
     // Cuándo y con qué mercado: hora UTC y actividad del último escaneo de la cadena.
     ...marketContext(venue)
@@ -9754,8 +9756,8 @@ function creatorHistory(creator) {
   const pnls = rows.filter((r) => r.c > 0).map((r) => Math.round((r.p / r.c - 1) * 100));
   return { creatorTradesWithYou: rows.length, ...pnls.length ? { creatorWorstPnlWithYouPct: Math.min(...pnls) } : {} };
 }
-async function featuresAtDecision(venue, asset2) {
-  const d = decidedFeatures(venue.id, asset2);
+async function featuresAtDecision(missionId, venue, asset2) {
+  const d = decidedFeatures(missionId, venue.id, asset2);
   const f = d ? d.features : await venue.entryFeatures(asset2);
   return {
     ...f,
@@ -9856,7 +9858,7 @@ async function recordTrade(args) {
       qty: args.bought.qty,
       costUsd: args.valueUsd,
       meta: args.meta,
-      features: measurable ? () => featuresAtDecision(venue, args.bought.asset) : void 0
+      features: measurable ? () => featuresAtDecision(args.missionId, venue, args.bought.asset) : void 0
     });
   }
 }
@@ -9888,7 +9890,7 @@ function sellFromPosition(args) {
 async function buyIntoPosition(args) {
   const venue = getVenue(args.venue);
   const measurable = venue.kind === "chain" && args.asset !== venue.native.address;
-  await openOrAdd({ ...args, features: measurable ? () => featuresAtDecision(venue, args.asset) : void 0 });
+  await openOrAdd({ ...args, features: measurable ? () => featuresAtDecision(args.missionId, venue, args.asset) : void 0 });
 }
 function listPositions(missionId) {
   const rows = missionId === void 0 ? db.prepare("SELECT * FROM positions ORDER BY id DESC").all() : db.prepare("SELECT * FROM positions WHERE mission_id = ? ORDER BY id DESC").all(missionId);
@@ -10265,85 +10267,6 @@ var init_lifi = __esm({
   }
 });
 
-// src/live/paths.ts
-import path5 from "node:path";
-var liveDir, signerInfoFile;
-var init_paths2 = __esm({
-  "src/live/paths.ts"() {
-    "use strict";
-    init_config();
-    liveDir = () => path5.join(config2.dataDir, "live");
-    signerInfoFile = () => path5.join(liveDir(), "signer.json");
-  }
-});
-
-// src/live/client.ts
-import { spawn } from "node:child_process";
-import { existsSync as existsSync2, readFileSync } from "node:fs";
-function readInfo() {
-  try {
-    return existsSync2(signerInfoFile()) ? JSON.parse(readFileSync(signerInfoFile(), "utf8")) : null;
-  } catch {
-    return null;
-  }
-}
-async function api(info, path9, init = {}, timeoutMs = 5e3) {
-  const res = await fetch(`http://127.0.0.1:${info.port}${path9}`, {
-    ...init,
-    headers: { authorization: `Bearer ${info.token}`, "content-type": "application/json", ...init.headers },
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
-}
-async function signerStatus() {
-  const info = readInfo();
-  if (!info) return null;
-  try {
-    return { info, status: await api(info, "/api/status") };
-  } catch {
-    return null;
-  }
-}
-async function runningSigner() {
-  const s = await signerStatus();
-  if (!s) throw new Error("El firmante de la cartera no est\xE1 en marcha: pide al usuario que la abra y desbloquee con /cryptoagent:cartera");
-  return s.info;
-}
-async function requestIntent(intent) {
-  const info = await runningSigner();
-  const r = await api(info, "/api/intent", { method: "POST", body: JSON.stringify(intent) }, 1e5);
-  return r.ticket;
-}
-async function signTx(body) {
-  const info = await runningSigner();
-  return api(info, "/api/sign", { method: "POST", body: JSON.stringify(body) }, 18e4);
-}
-async function ensureSigner() {
-  const running2 = await signerStatus();
-  if (running2) return { ...running2, started: false };
-  const entry = asset("signer.mjs", "src/live/signer/main.ts");
-  const args = entry.endsWith(".ts") ? ["--import", "tsx", entry] : [entry];
-  const child2 = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true, env: process.env });
-  child2.unref();
-  for (let i = 0; i < 50; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    const s = await signerStatus();
-    if (s && s.status.pid === child2.pid) return { ...s, started: true };
-  }
-  throw new Error("El firmante no ha arrancado");
-}
-var walletUrl;
-var init_client = __esm({
-  "src/live/client.ts"() {
-    "use strict";
-    init_paths();
-    init_paths2();
-    walletUrl = (info) => `http://127.0.0.1:${info.port}/wallet`;
-  }
-});
-
 // src/live/chain.ts
 async function solanaRpc(method, params, ttlMs = 5e3) {
   const res = await fetchJson(solanaRpcUrl(), {
@@ -10430,6 +10353,85 @@ var init_chain = __esm({
     solanaRpcUrl = () => process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
     TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
     pad32 = (addr) => addr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  }
+});
+
+// src/live/paths.ts
+import path5 from "node:path";
+var liveDir, signerInfoFile;
+var init_paths2 = __esm({
+  "src/live/paths.ts"() {
+    "use strict";
+    init_config();
+    liveDir = () => path5.join(config2.dataDir, "live");
+    signerInfoFile = () => path5.join(liveDir(), "signer.json");
+  }
+});
+
+// src/live/client.ts
+import { spawn } from "node:child_process";
+import { existsSync as existsSync2, readFileSync } from "node:fs";
+function readInfo() {
+  try {
+    return existsSync2(signerInfoFile()) ? JSON.parse(readFileSync(signerInfoFile(), "utf8")) : null;
+  } catch {
+    return null;
+  }
+}
+async function api(info, path9, init = {}, timeoutMs = 5e3) {
+  const res = await fetch(`http://127.0.0.1:${info.port}${path9}`, {
+    ...init,
+    headers: { authorization: `Bearer ${info.token}`, "content-type": "application/json", ...init.headers },
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+  return body;
+}
+async function signerStatus() {
+  const info = readInfo();
+  if (!info) return null;
+  try {
+    return { info, status: await api(info, "/api/status") };
+  } catch {
+    return null;
+  }
+}
+async function runningSigner() {
+  const s = await signerStatus();
+  if (!s) throw new Error("El firmante de la cartera no est\xE1 en marcha: pide al usuario que la abra y desbloquee con /cryptoagent:cartera");
+  return s.info;
+}
+async function requestIntent(intent) {
+  const info = await runningSigner();
+  const r = await api(info, "/api/intent", { method: "POST", body: JSON.stringify(intent) }, 1e5);
+  return r.ticket;
+}
+async function signTx(body) {
+  const info = await runningSigner();
+  return api(info, "/api/sign", { method: "POST", body: JSON.stringify(body) }, 18e4);
+}
+async function ensureSigner() {
+  const running2 = await signerStatus();
+  if (running2) return { ...running2, started: false };
+  const entry = asset("signer.mjs", "src/live/signer/main.ts");
+  const args = entry.endsWith(".ts") ? ["--import", "tsx", entry] : [entry];
+  const child2 = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true, env: process.env });
+  child2.unref();
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    const s = await signerStatus();
+    if (s && s.status.pid === child2.pid) return { ...s, started: true };
+  }
+  throw new Error("El firmante no ha arrancado");
+}
+var walletUrl;
+var init_client = __esm({
+  "src/live/client.ts"() {
+    "use strict";
+    init_paths();
+    init_paths2();
+    walletUrl = (info) => `http://127.0.0.1:${info.port}/wallet`;
   }
 });
 
@@ -10556,7 +10558,7 @@ async function liveBridge(a) {
     if (!isNativeIn) {
       const spender = q.approvalAddress ?? q.transactionRequest.to;
       if (await erc20Allowance(src.id, tin.address, pub.evm, spender) < amountIn) {
-        const data = `0x095ea7b3${spender.toLowerCase().replace(/^0x/, "").padStart(64, "0")}${amountIn.toString(16).padStart(64, "0")}`;
+        const data = `0x095ea7b3${pad32(spender)}${amountIn.toString(16).padStart(64, "0")}`;
         const ap = await signTx({ ticket, chain: src.id, kind: "approve", usd: usd2, evmTx: { chainId: c.chainId, to: tin.address, data, value: "0" } });
         logLiveTx(m, src.id, "approve", ap.ok ? "confirmed" : "failed", `Approve de ${a.amount} ${tin.symbol} a Li.Fi`, { hash: ap.hash, error: ap.error });
         if (!ap.ok) throw new Error(`El approve fall\xF3 (${explorerTx(src.id, ap.hash)}): ${ap.error}`);
@@ -10669,6 +10671,7 @@ var init_bridge = __esm({
     init_mission();
     init_portfolio();
     init_venues();
+    init_chain();
     init_client();
     init_execute();
     init_sync();
@@ -11215,7 +11218,7 @@ async function stopMission(closePositions, missionId) {
   return { missionId: mission.id, finalUsd: final.totalUsd, problems };
 }
 function minutesSinceLastTrade(mission) {
-  const last = db.prepare("SELECT MAX(ts) AS ts FROM journal WHERE mission_id = ? AND kind IN ('swap', 'cex_order', 'transfer') AND (reasoning IS NULL OR reasoning NOT LIKE 'Cierre %') AND (reasoning IS NULL OR reasoning NOT LIKE 'Parada %')").get(mission.id).ts;
+  const last = db.prepare("SELECT MAX(ts) AS ts FROM journal WHERE mission_id = ? AND kind IN ('swap', 'cex_order', 'transfer', 'perp') AND (reasoning IS NULL OR reasoning NOT LIKE 'Cierre %') AND (reasoning IS NULL OR reasoning NOT LIKE 'Parada %')").get(mission.id).ts;
   return (Date.now() - new Date(last ?? mission.started_at ?? mission.created_at).getTime()) / 6e4;
 }
 function idleCheck(mission, v, secondsLeft) {
@@ -11341,6 +11344,10 @@ function logLiveTx(missionId, chain, kind, status, summary, extra = {}) {
     extra.error ?? null
   );
 }
+function slippageForMinOut(slippageBps, out, minOut) {
+  if (out < minOut) return -1;
+  return Math.min(slippageBps, Math.floor(Number((out - minOut) * 10000n / out)));
+}
 async function liveSwap(args) {
   const mission = getMission(args.missionId);
   if (!isLive(mission)) throw new Error("liveSwap solo sirve para misiones reales");
@@ -11366,6 +11373,8 @@ async function liveSwap(args) {
     throw new Error(`No tienes ${chain.native.symbol} suficiente para pagar la red en ${chain.label} (tienes ${nativeLeft.toPrecision(3)}).`);
   }
   const quote2 = await chain.quote({ input: input2, output: output2, amountIn: amount, slippageBps: args.slippageBps });
+  if (args.minOut !== void 0 && quote2.amountOut < args.minOut) throw new LimitNotReached(quote2.amountOut, args.minOut);
+  const minOutBase = args.minOut !== void 0 ? toBaseUnits(args.minOut, output2.decimals) : void 0;
   let usd2 = chain.isCash(input2.address) ? amount : chain.isCash(output2.address) ? quote2.amountOut : 0;
   if (!usd2) {
     const prices = await chain.priceUsd([input2.address, output2.address]).catch(() => ({}));
@@ -11386,7 +11395,13 @@ async function liveSwap(args) {
   let res;
   let pre = null;
   if (chain.id === "solana") {
-    const q = await getQuote(input2.address, output2.address, amountIn, args.slippageBps, 0);
+    let q = await getQuote(input2.address, output2.address, amountIn, args.slippageBps, 0);
+    if (minOutBase !== void 0) {
+      const s = slippageForMinOut(args.slippageBps, BigInt(q.outAmount), minOutBase);
+      if (s < 0) throw new LimitNotReached(fromBaseUnits(BigInt(q.outAmount), output2.decimals), args.minOut);
+      if (s < args.slippageBps) q = await getQuote(input2.address, output2.address, amountIn, s, 0);
+      if (BigInt(q.otherAmountThreshold ?? "0") < minOutBase) throw new LimitNotReached(fromBaseUnits(BigInt(q.outAmount), output2.decimals), args.minOut);
+    }
     const built = await fetchJson("https://lite-api.jup.ag/swap/v1/swap", {
       method: "POST",
       ttlMs: 0,
@@ -11408,13 +11423,19 @@ async function liveSwap(args) {
       { headers, ttlMs: 0 }
     );
     if (route.code !== 0 || !route.data) throw new Error(`KyberSwap no encuentra ruta: ${route.message ?? route.code}`);
+    let slippageBps = args.slippageBps;
+    if (minOutBase !== void 0) {
+      const out = BigInt(route.data.routeSummary.amountOut ?? "0");
+      slippageBps = slippageForMinOut(args.slippageBps, out, minOutBase);
+      if (slippageBps < 0) throw new LimitNotReached(fromBaseUnits(out, output2.decimals), args.minOut);
+    }
     const built = await fetchJson(
       `https://aggregator-api.kyberswap.com/${c.kyber}/api/v1/route/build`,
       {
         method: "POST",
         ttlMs: 0,
         headers,
-        body: { routeSummary: route.data.routeSummary, sender: pub.evm, recipient: pub.evm, slippageTolerance: args.slippageBps, enableGasEstimation: false }
+        body: { routeSummary: route.data.routeSummary, sender: pub.evm, recipient: pub.evm, slippageTolerance: slippageBps, enableGasEstimation: false }
       }
     );
     if (built.code !== 0 || !built.data) throw new Error(`KyberSwap no construy\xF3 la transacci\xF3n: ${built.message ?? built.code}`);
@@ -11422,7 +11443,7 @@ async function liveSwap(args) {
     if (!isNativeIn) {
       const allowance = await erc20Allowance(evmChain, input2.address, pub.evm, router);
       if (allowance < amountIn) {
-        const data = `0x095ea7b3${pad322(router)}${amountIn.toString(16).padStart(64, "0")}`;
+        const data = `0x095ea7b3${pad32(router)}${amountIn.toString(16).padStart(64, "0")}`;
         const ap = await signTx({ ticket, chain: chain.id, kind: "approve", usd: usd2, evmTx: { chainId: c.chainId, to: input2.address, data, value: "0" } });
         logLiveTx(m, chain.id, "approve", ap.ok ? "confirmed" : "failed", `Approve de ${amount} ${input2.symbol} al router de KyberSwap`, { hash: ap.hash, error: ap.error });
         if (!ap.ok) throw new Error(`El approve fall\xF3 (${explorerTx(chain.id, ap.hash)}): ${ap.error}`);
@@ -11500,12 +11521,12 @@ async function rawTokenBalance(chain, pub, token2) {
   return value.reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
 }
 async function erc20Allowance(chain, token2, owner, spender) {
-  const [hex3] = await rpcBatch(chain, [{ method: "eth_call", params: [{ to: token2, data: `0xdd62ed3e${pad322(owner)}${pad322(spender)}` }, "latest"] }]);
+  const [hex3] = await rpcBatch(chain, [{ method: "eth_call", params: [{ to: token2, data: `0xdd62ed3e${pad32(owner)}${pad32(spender)}` }, "latest"] }]);
   return hex3 && hex3 !== "0x" ? BigInt(hex3) : 0n;
 }
 async function evmBalancesAt(chain, owner, tokens, block) {
   const calls = tokens.map(
-    (t) => t.address === NATIVE ? { method: "eth_getBalance", params: [owner, block] } : { method: "eth_call", params: [{ to: t.address, data: `0x70a08231${pad322(owner)}` }, block] }
+    (t) => t.address === NATIVE ? { method: "eth_getBalance", params: [owner, block] } : { method: "eth_call", params: [{ to: t.address, data: `0x70a08231${pad32(owner)}` }, block] }
   );
   const out = await rpcBatch(chain, calls);
   return Object.fromEntries(tokens.map((t, i) => [t.address, out[i] && out[i] !== "0x" ? BigInt(out[i]) : 0n]));
@@ -11540,7 +11561,7 @@ async function reconcile(chain, hash2, pub, input2, output2, pre) {
   };
   return { sold: -delta(input2), received: delta(output2), networkFee: `${fromBaseUnits(gas, 18)} ${getChain(chain).native.symbol}` };
 }
-var NATIVE_RESERVE, SOLANA_MAX_PRIORITY_LAMPORTS, explorerTx, SOLANA_FEE_ALLOWANCE, pad322;
+var NATIVE_RESERVE, SOLANA_MAX_PRIORITY_LAMPORTS, explorerTx, SOLANA_FEE_ALLOWANCE;
 var init_execute = __esm({
   "src/live/execute.ts"() {
     "use strict";
@@ -11559,7 +11580,6 @@ var init_execute = __esm({
     SOLANA_MAX_PRIORITY_LAMPORTS = 1e6;
     explorerTx = (chain, hash2) => chain === "solana" ? `https://solscan.io/tx/${hash2}` : chain === "base" ? `https://basescan.org/tx/${hash2}` : `https://bscscan.com/tx/${hash2}`;
     SOLANA_FEE_ALLOWANCE = 10000000n;
-    pad322 = (addr) => addr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
   }
 });
 
@@ -11790,6 +11810,7 @@ async function quoteSwap(chainId, inputRef, outputRef, amount, slippageBps = 50,
   const chain = getChain(chainId);
   const [input2, output2] = await Promise.all([chain.resolveToken(inputRef), chain.resolveToken(outputRef)]);
   const q = await chain.quote({ input: input2, output: output2, amountIn: amount, slippageBps });
+  for (const [k, v] of lastQuotes) if (Date.now() - v.at > QUOTE_TTL_MS) lastQuotes.delete(k);
   if (missionId != null) lastQuotes.set(quoteKey(missionId, chain.id, input2.address, output2.address), { amountIn: amount, amountOut: q.amountOut, at: Date.now() });
   return {
     chain: chain.id,
@@ -12146,7 +12167,7 @@ async function one(p) {
   return out;
 }
 async function missionCounterfactuals(missionId, limit = 8) {
-  const closed = listPositions(missionId).filter((p) => p.status === "closed").slice(-limit);
+  const closed = listPositions(missionId).filter((p) => p.status === "closed").slice(0, limit);
   const out = [];
   for (const p of closed) {
     const cached3 = cache2.get(p.id);
@@ -42057,21 +42078,24 @@ var STRONG_NEGATIVE = { minDecided: 4, minWilsonLowPct: 50, maxAvgPnlPct: -15 };
 function blockingBeliefs(venue, entry, asset2 = "", decision = {}) {
   const closed = closedPositions();
   const pos = { venue, asset: asset2, entry: { ...entry, venue }, research: decision };
-  return db.prepare("SELECT * FROM beliefs WHERE status = 'active' AND expectation = 'negative' AND condition IS NOT NULL").all().filter((b) => matches(JSON.parse(b.condition), pos)).map((b) => ({ b, ev: beliefEvidence(b, closed) })).filter(({ ev }) => {
-    const t = ev.matchingTrades;
-    return t !== void 0 && (t.inFavor ?? 0) + (t.against ?? 0) >= STRONG_NEGATIVE.minDecided && (t.wilsonLowPct ?? 0) >= STRONG_NEGATIVE.minWilsonLowPct && (t.avgPnlPct ?? 0) <= STRONG_NEGATIVE.maxAvgPnlPct;
-  }).map(({ b, ev }) => ({ id: b.id, statement: b.statement, verdict: ev.verdict }));
+  return db.prepare("SELECT * FROM beliefs WHERE status = 'active' AND expectation = 'negative' AND condition IS NOT NULL").all().filter((b) => matches(JSON.parse(b.condition), pos)).map((b) => ({ b, ev: beliefEvidence(b, closed) })).filter(({ ev }) => isStrongNegative(ev)).map(({ b, ev }) => ({ id: b.id, statement: b.statement, verdict: ev.verdict }));
+}
+function isStrongNegative(ev) {
+  const t = ev.matchingTrades;
+  return t !== void 0 && (t.inFavor ?? 0) + (t.against ?? 0) >= STRONG_NEGATIVE.minDecided && (t.wilsonLowPct ?? 0) >= STRONG_NEGATIVE.minWilsonLowPct && (t.avgPnlPct ?? 0) <= STRONG_NEGATIVE.maxAvgPnlPct;
 }
 function beliefsFor(venue, entry, asset2 = "", decision = {}) {
   const pos = { venue, asset: asset2, entry: { ...entry, venue }, research: decision };
-  const block = new Set(blockingBeliefs(venue, entry, asset2, decision).map((b) => b.id));
+  const block = /* @__PURE__ */ new Set();
   const rows = db.prepare("SELECT * FROM beliefs WHERE status = 'active' AND condition IS NOT NULL").all().filter(
     (b) => matches(JSON.parse(b.condition), pos)
   );
   const closed = rows.length ? closedPositions() : [];
   const cases = {};
   for (const b of rows) {
-    const t = beliefEvidence(b, closed).matchingTrades;
+    const ev = beliefEvidence(b, closed);
+    if (b.expectation === "negative" && isStrongNegative(ev)) block.add(b.id);
+    const t = ev.matchingTrades;
     const inFavor = t?.inFavor ?? 0;
     const against = t?.against ?? 0;
     cases[b.id] = { inFavor, against, stage: t?.stage ?? "hypothesis", verdict: beliefVerdict(inFavor + against, t?.wilsonLowPct, t?.wilsonHighPct) };
@@ -42294,7 +42318,7 @@ function updateHowto(a) {
 function validateCondition(cond, expectation) {
   if (cond && !expectation) throw new Error("Una creencia con condici\xF3n necesita expectation: positive (tiende a ganar) o negative (tiende a perder)");
 }
-var sameCondition = (cond) => cond ? db.prepare("SELECT id FROM beliefs WHERE status = 'active' AND condition = ?").get(JSON.stringify(cond))?.id : void 0;
+var sameCondition = (cond, exceptId = 0) => cond ? db.prepare("SELECT id FROM beliefs WHERE status = 'active' AND condition = ? AND id != ?").get(JSON.stringify(cond), exceptId)?.id : void 0;
 function writeBelief(a) {
   validateCondition(a.condition, a.expectation);
   if (activeCount("beliefs") >= BELIEF_LIMIT) {
@@ -42329,6 +42353,13 @@ function reviseBelief(a) {
   if (a.statement) {
     const dup = duplicateOf("beliefs", fingerprint(statement), a.id);
     if (dup) throw new Error(`Con ese texto ser\xEDa casi igual que la creencia #${dup}. Si sobran, retira una de las dos.`);
+  }
+  if (!a.retire && b.status === "active" && (a.condition || a.expectation) && condition && expectation) {
+    const cond = JSON.parse(condition);
+    const dup = sameCondition(cond, a.id);
+    if (dup) throw new Error(`Con esa condici\xF3n ser\xEDa igual que la creencia #${dup}. Si sobran, retira una de las dos.`);
+    const twin = evidenceTwin(cond, expectation, closedPositions(), a.id);
+    if (twin) throw new Error(`Con esa condici\xF3n cubrir\xEDa casi las mismas operaciones que la creencia #${twin} con la misma expectativa. Si sobran, retira una de las dos.`);
   }
   db.prepare(
     `UPDATE beliefs SET statement = ?, applies_to = ?, expectation = ?, condition = ?, fingerprint = ?, status = ?, status_reason = ?, updated_at = ? WHERE id = ?`
@@ -42691,7 +42722,7 @@ init_positions();
 
 // src/dashboard/timeline.ts
 init_db();
-import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync } from "node:fs";
+import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import os2 from "node:os";
 import path7 from "node:path";
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
@@ -42880,12 +42911,12 @@ Riesgos comprobados: ${t.risks_checked}` : "") + (t.overrides?.length ? `
 Ignora a sabiendas: ${t.overrides.map((o) => `#${o.id} (${o.reason})`).join("; ")}` : "");
 var tradeMeta = (t) => ({ thesis: formatThesis(t), lessonsApplied: t.memory_note, beliefsApplied: t.beliefs_applied });
 var lastReads = /* @__PURE__ */ new Map();
-function riskCheck(chain, token2, f) {
-  const key = `${chain}:${token2.toLowerCase()}`;
+function riskCheck(chain, token2, f, missionId) {
+  const key = `${missionId ?? "-"}:${chain}:${token2.toLowerCase()}`;
   const prev = lastReads.get(key);
   lastReads.set(key, { at: Date.now(), f });
-  recordRead(chain, token2, { liquidityUsd: f.liquidityUsd, netBuyers5m: f.netBuyers5m });
-  recordFeatures(chain, token2, f);
+  recordRead(missionId, chain, token2, { liquidityUsd: f.liquidityUsd, netBuyers5m: f.netBuyers5m });
+  recordFeatures(missionId, chain, token2, f);
   const change = (a, b) => a !== void 0 && b !== void 0 && a !== 0 ? Number(((b - a) / Math.abs(a) * 100).toFixed(1)) : void 0;
   return {
     ...f.creatorIsLaunchpadDeployer ? { creatorIsLaunchpadDeployer: true } : {},
@@ -43012,7 +43043,7 @@ async function screenCandidates(chain, candidates, n3, missionId = null) {
     const address = String(cand.mint ?? cand.token ?? "");
     const f = address ? await c.entryFeatures(address).catch(() => null) : null;
     if (!f) return { ...cand, risk: "sin datos" };
-    const rc = riskCheck(chain, address, f);
+    const rc = riskCheck(chain, address, f, missionId);
     return { ...cand, risk: riskCell(rc), memory: memoryCell(chain, f, address, missionId), yourHistory: tokenHistory(chain, address) };
   });
   return [...checked, ...candidates.slice(n3)];
@@ -43023,7 +43054,7 @@ async function briefReports(chain, tokens, missionId = null) {
     const t = await c.resolveToken(token2).catch(() => null);
     const f = t ? await c.entryFeatures(t.address).catch(() => null) : null;
     if (!t || !f) return { token: token2, symbol: t?.symbol, error: "sin datos (direcci\xF3n desconocida o APIs ca\xEDdas)" };
-    const rc = riskCheck(chain, token2, f);
+    const rc = riskCheck(chain, token2, f, missionId);
     const since = rc.sinceLastRead;
     return {
       token: token2,
@@ -43132,13 +43163,17 @@ var SIM_TOOLS = [
       if (tokens?.length) return briefReports(chain, tokens, ctx.missionId);
       if (!token2) throw new Error("Indica token (ficha completa) o tokens (fichas breves de varios)");
       const c = getChain(chain);
-      const [report, features] = await Promise.all([c.research.report(token2.trim()), c.resolveToken(token2.trim()).then((t) => c.entryFeatures(t.address)).catch(() => null)]);
-      const resolved = await c.resolveToken(token2.trim()).catch(() => null);
+      const resolving = c.resolveToken(token2.trim()).catch(() => null);
+      const [report, resolved, features] = await Promise.all([
+        c.research.report(token2.trim()),
+        resolving,
+        resolving.then((t) => t ? c.entryFeatures(t.address) : null).catch(() => null)
+      ]);
       const history = resolved ? tokenHistory(chain, resolved.address) : void 0;
       const roundTrip = resolved ? await roundTripCost(chain, resolved).catch(() => void 0) : void 0;
       return json2({
         ...compactReport(report),
-        ...features ? { riskCheck: riskCheck(chain, token2.trim(), features) } : {},
+        ...features ? { riskCheck: riskCheck(chain, token2.trim(), features, ctx.missionId) } : {},
         yourHistory: history ?? "nunca lo has operado",
         ...roundTrip ? { roundTrip } : {}
       });
@@ -44188,7 +44223,7 @@ function transcriptEvents(since) {
       }
       const file2 = path7.join(subDir, f.replace(".meta.json", ".jsonl"));
       if (!existsSync4(file2)) continue;
-      const st = statSync(file2);
+      const st = statSync2(file2);
       if (st.mtimeMs < sinceMs) continue;
       const cached3 = fileCache.get(file2);
       if (cached3 && cached3.mtimeMs === st.mtimeMs && cached3.size === st.size) {
